@@ -6,12 +6,14 @@ src/llm/api.py, src/llm/tool_loop.py, src/llm/runtime.py.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from typing import Any, cast
 
 from pydantic import BaseModel
 
-from src.config import ModelConfig, PromptCachePolicy, coerce_provider_timeout
+from src.config import ModelConfig, PromptCachePolicy, coerce_provider_timeout, settings
 from src.exceptions import ValidationException
 
 from .backend import (
@@ -22,6 +24,44 @@ from .backend import (
 
 # Operator escape-hatch keys recognized inside ModelConfig.provider_params.
 PASSTHROUGH_KEYS = ("extra_body", "extra_headers", "extra_query")
+
+# Process-wide cap on in-flight provider requests. Built lazily so the
+# semaphore binds to the running event loop rather than import time, and so a
+# limit of 0 costs nothing. execute_completion and execute_stream are the only
+# places a provider call is issued, which makes this the one chokepoint that
+# covers every agent — the tool loop acquires per call rather than per loop, so
+# a long dialectic conversation yields its slot between iterations instead of
+# holding it for the whole exchange.
+_provider_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_provider_semaphore() -> asyncio.Semaphore | None:
+    """Return the shared concurrency gate, or None when the cap is disabled."""
+    global _provider_semaphore
+    limit = settings.LLM.MAX_CONCURRENT_REQUESTS
+    if limit <= 0:
+        return None
+    # No await between the check and the assignment, so this is atomic under
+    # asyncio's single-threaded scheduling — no lock needed.
+    if _provider_semaphore is None:
+        _provider_semaphore = asyncio.Semaphore(limit)
+    return _provider_semaphore
+
+
+async def _stream_holding_slot(
+    semaphore: asyncio.Semaphore,
+    stream: AsyncIterator[StreamChunk],
+) -> AsyncIterator[StreamChunk]:
+    """Hold a concurrency slot for the full lifetime of a streamed response.
+
+    Streaming returns an iterator rather than a completed result, so acquiring
+    around the call that builds it would release the slot before a single token
+    had been read. The slot is released when the generator is exhausted or
+    closed, including on early break (``async with`` unwinds on GeneratorExit).
+    """
+    async with semaphore:
+        async for chunk in stream:
+            yield chunk
 
 
 def coerce_passthrough_mapping(key: str, value: Any) -> dict[str, Any]:
@@ -167,20 +207,22 @@ async def execute_completion(
     if cache_policy is not None:
         merged_extra_params["cache_policy"] = cache_policy
 
-    return await backend.complete(
-        model=config.model,
-        messages=messages,
-        max_tokens=effective_max_tokens,
-        temperature=config.temperature,
-        stop=stop if stop is not None else config.stop_sequences,
-        tools=tools,
-        tool_choice=tool_choice,
-        response_format=response_format,
-        thinking_budget_tokens=config.thinking_budget_tokens,
-        thinking_effort=config.thinking_effort,
-        max_output_tokens=effective_max_tokens,
-        extra_params=merged_extra_params,
-    )
+    semaphore = _get_provider_semaphore()
+    async with semaphore or nullcontext():
+        return await backend.complete(
+            model=config.model,
+            messages=messages,
+            max_tokens=effective_max_tokens,
+            temperature=config.temperature,
+            stop=stop if stop is not None else config.stop_sequences,
+            tools=tools,
+            tool_choice=tool_choice,
+            response_format=response_format,
+            thinking_budget_tokens=config.thinking_budget_tokens,
+            thinking_effort=config.thinking_effort,
+            max_output_tokens=effective_max_tokens,
+            extra_params=merged_extra_params,
+        )
 
 
 async def execute_stream(
@@ -206,7 +248,7 @@ async def execute_stream(
     if cache_policy is not None:
         merged_extra_params["cache_policy"] = cache_policy
 
-    return backend.stream(
+    stream = backend.stream(
         model=config.model,
         messages=messages,
         max_tokens=effective_max_tokens,
@@ -220,3 +262,8 @@ async def execute_stream(
         max_output_tokens=effective_max_tokens,
         extra_params=merged_extra_params,
     )
+
+    semaphore = _get_provider_semaphore()
+    if semaphore is None:
+        return stream
+    return _stream_holding_slot(semaphore, stream)

@@ -769,6 +769,30 @@ class LLMSettings(HonchoSettings):
     # General LLM settings
     DEFAULT_MAX_TOKENS: Annotated[int, Field(default=1000, gt=0, le=100_000)] = 2500
 
+    # Client-level HTTP timeout applied to every provider request, in seconds.
+    # Anthropic and Gemini previously pinned 600s via module constants while the
+    # OpenAI client passed nothing and silently inherited the SDK's own 600s
+    # default; this makes the value single-sourced and configurable. Self-hosted
+    # endpoints usually want a much lower value than a hosted provider: a local
+    # server that has not answered in a couple of minutes is saturated, and
+    # waiting the full ten holds a slot that queued work could be using.
+    REQUEST_TIMEOUT_SECONDS: Annotated[float, Field(default=600.0, gt=0)] = 600.0
+
+    # Provider-SDK-level retries, distinct from Honcho's own tenacity retries.
+    # The OpenAI SDK defaults to 2, which multiplies rather than replaces the
+    # outer retry loop: 3 Honcho attempts x 3 HTTP requests = 9 requests, so a
+    # 600s timeout becomes a 90-minute stall. Set 0 to leave retrying entirely
+    # to the outer loop, whose behavior is visible in the logs.
+    PROVIDER_MAX_RETRIES: Annotated[int, Field(default=2, ge=0)] = 2
+
+    # Max in-flight provider requests per process (API and deriver each get
+    # their own budget). Requests above the limit wait for a slot rather than
+    # piling onto the provider. 0 disables the cap, preserving unbounded
+    # concurrency. Mainly useful for self-hosted single-GPU endpoints, where
+    # oversubscription degrades every in-flight request at once instead of
+    # queueing them.
+    MAX_CONCURRENT_REQUESTS: Annotated[int, Field(default=0, ge=0)] = 0
+
     # Maximum characters for tool output to prevent token explosion.
     # Set to 10,000 chars (~2,500 tokens at 4 chars/token) to stay well under
     # typical context limits while providing substantial tool output.
