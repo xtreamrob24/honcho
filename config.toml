@@ -45,10 +45,14 @@ OPENAI_BASE_URL = "https://llama.as.openheidelberg.de/v1"
 # loop and fires immediately, which put 8 concurrent generations on one GPU and
 # produced 502s. A single endpoint degrades all in-flight requests together
 # instead of queueing, so bounding the fan-out is what keeps latency sane. The
-# budget is per process, so the API and deriver containers get 2 each.
+# budget is per process: at 1, the API and deriver hold one slot each, so the
+# endpoint sees at most two concurrent requests from Honcho plus whatever
+# Hermes is doing. Dialectic requests beyond that queue rather than pile on —
+# the tool loop releases its slot between iterations, so concurrent
+# conversations interleave instead of blocking each other wholesale.
 REQUEST_TIMEOUT_SECONDS = 300.0
 PROVIDER_MAX_RETRIES = 0
-MAX_CONCURRENT_REQUESTS = 2
+MAX_CONCURRENT_REQUESTS = 1
 
 # ---------------------------------------------------------------------------
 # Embeddings — the one deliberate exception
