@@ -34,10 +34,22 @@ OPENAI_BASE_URL = "https://llama.as.openheidelberg.de/v1"
 
 # Tuning for a single self-hosted endpoint rather than a hosted provider.
 #
-# A successful deriver call took 194s under no contention, so the timeout has
-# to clear that with headroom; 300s does, while failing 2x faster than the 600s
-# default. PROVIDER_MAX_RETRIES = 0 removes the OpenAI SDK's own retry layer,
-# which multiplied rather than replaced Honcho's: 3 tenacity attempts x 3 SDK
+# REQUEST_TIMEOUT_SECONDS is deliberately generous, and must stay that way.
+# This server does NOT abort generation when the client disconnects: with the
+# whole deployment stopped, the model stayed busy for 56 minutes (12:57-13:53)
+# against a normal idle-sleep of ~15s, working through requests Honcho had
+# already given up on. A short timeout therefore does not free the GPU — it
+# burns it on work the result of which is then thrown away, while the retry
+# queues behind the very generation it just abandoned. That feedback loop is
+# what produced the 90-minute stalls and the 502s.
+#
+# Calibration: an observed SUCCESSFUL call took 279s on an otherwise idle
+# server. Minutes-long calls are the normal regime here, not a fault, so the
+# timeout is set to ~3x that. It should mean "genuinely broken", never "slow".
+# Do not tighten it toward the measured completion time.
+#
+# PROVIDER_MAX_RETRIES = 0 removes the OpenAI SDK's own retry layer, which
+# multiplied rather than replaced Honcho's: 3 tenacity attempts x 3 SDK
 # requests turned one 600s timeout into a 90-minute stall.
 #
 # MAX_CONCURRENT_REQUESTS is the important one. Honcho otherwise places no cap
@@ -50,7 +62,7 @@ OPENAI_BASE_URL = "https://llama.as.openheidelberg.de/v1"
 # Hermes is doing. Dialectic requests beyond that queue rather than pile on —
 # the tool loop releases its slot between iterations, so concurrent
 # conversations interleave instead of blocking each other wholesale.
-REQUEST_TIMEOUT_SECONDS = 300.0
+REQUEST_TIMEOUT_SECONDS = 900.0
 PROVIDER_MAX_RETRIES = 0
 MAX_CONCURRENT_REQUESTS = 1
 
