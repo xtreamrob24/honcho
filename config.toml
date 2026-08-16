@@ -32,6 +32,24 @@
 [llm]
 OPENAI_BASE_URL = "https://llama.as.openheidelberg.de/v1"
 
+# Tuning for a single self-hosted endpoint rather than a hosted provider.
+#
+# A successful deriver call took 194s under no contention, so the timeout has
+# to clear that with headroom; 300s does, while failing 2x faster than the 600s
+# default. PROVIDER_MAX_RETRIES = 0 removes the OpenAI SDK's own retry layer,
+# which multiplied rather than replaced Honcho's: 3 tenacity attempts x 3 SDK
+# requests turned one 600s timeout into a 90-minute stall.
+#
+# MAX_CONCURRENT_REQUESTS is the important one. Honcho otherwise places no cap
+# on in-flight LLM calls — every inbound dialectic request starts its own tool
+# loop and fires immediately, which put 8 concurrent generations on one GPU and
+# produced 502s. A single endpoint degrades all in-flight requests together
+# instead of queueing, so bounding the fan-out is what keeps latency sane. The
+# budget is per process, so the API and deriver containers get 2 each.
+REQUEST_TIMEOUT_SECONDS = 300.0
+PROVIDER_MAX_RETRIES = 0
+MAX_CONCURRENT_REQUESTS = 2
+
 # ---------------------------------------------------------------------------
 # Embeddings — the one deliberate exception
 # ---------------------------------------------------------------------------
@@ -56,14 +74,16 @@ api_key_env = "OPENAI_EMBEDDING_KEY"  # Name of the env var, not the key itself.
 # ---------------------------------------------------------------------------
 # Deriver — memory formation, one structured-output call per message batch
 # ---------------------------------------------------------------------------
-# On glm-4.7-flash rather than gpt-oss-20b: the deriver is a background grind
-# with no user waiting on it, so throughput matters more than depth here. It is
-# also the workload that wedged the endpoint — on failure the queue marks only
-# the first item errored (queue_manager.py:597) and re-claims the work unit, so
-# a call that keeps timing out keeps one request in flight ~continuously.
+# Stays on gpt-oss-20b deliberately. This is the only call that uses strict
+# structured output (`response_model=PromptRepresentation` -> the `.parse()`
+# path at backends/openai.py:211), and gpt-oss-20b is proven to satisfy it on
+# this deployment — two batches parsed cleanly, 9 and 12 conclusions. Swapping
+# in an untested model risks the one component that demonstrably works, and
+# buys little: the deriver runs one request at a time and was never the source
+# of the endpoint contention.
 [deriver.model_config]
 transport = "openai"
-model = "glm-4.7-flash"
+model = "gpt-oss-20b"
 thinking_effort = "low"  # Sent as `reasoning_effort` (backends/openai.py:367).
 # Uncomment if the deriver starts failing on malformed JSON rather than auth.
 # Many OpenAI-compatible servers (llama.cpp in particular) do not implement
@@ -83,22 +103,27 @@ thinking_effort = "low"  # Sent as `reasoning_effort` (backends/openai.py:367).
 [dialectic.levels.minimal.model_config]
 transport = "openai"
 model = "gpt-oss-20b"
+thinking_effort = "low"
 
 [dialectic.levels.low.model_config]
 transport = "openai"
 model = "gpt-oss-20b"
+thinking_effort = "low"
 
 [dialectic.levels.medium.model_config]
 transport = "openai"
 model = "gpt-oss-20b"
+thinking_effort = "low"
 
 [dialectic.levels.high.model_config]
 transport = "openai"
 model = "gpt-oss-20b"
+thinking_effort = "low"
 
 [dialectic.levels.max.model_config]
 transport = "openai"
 model = "gpt-oss-20b"
+thinking_effort = "low"
 
 # ---------------------------------------------------------------------------
 # Summary — two-tier session summarization

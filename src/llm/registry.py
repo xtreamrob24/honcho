@@ -33,13 +33,23 @@ if TYPE_CHECKING:
 # Provider SDKs are imported lazily inside the client factories below so a
 # process only pays the import-time memory cost of the providers it uses.
 
-# Default client-level HTTP timeouts. Anthropic accepts seconds (float);
-# google-genai's HttpOptions.timeout is an int in milliseconds, so the Gemini
-# value is kept separately. Both default to 10 minutes to match the existing
-# Anthropic behavior — long enough for slow streamed responses, short enough
-# that a stalled socket can no longer wedge the deriver worker (see #785).
-_ANTHROPIC_TIMEOUT_S = 600.0
-_GEMINI_TIMEOUT_MS = 600_000
+
+# Client-level HTTP timeouts, single-sourced from LLM.REQUEST_TIMEOUT_SECONDS
+# (default 600s, preserving the previous hardcoded behavior). Anthropic accepts
+# seconds (float); google-genai's HttpOptions.timeout is an int in milliseconds.
+# Long enough for slow streamed responses, short enough that a stalled socket
+# can no longer wedge the deriver worker (see #785).
+#
+# The OpenAI client previously passed no timeout at all and fell through to the
+# SDK's own default, so it was the one transport this protection did not cover —
+# and the only one that could not be tuned for a slow self-hosted endpoint.
+def _timeout_s() -> float:
+    return settings.LLM.REQUEST_TIMEOUT_SECONDS
+
+
+def _timeout_ms() -> int:
+    return int(settings.LLM.REQUEST_TIMEOUT_SECONDS * 1000)
+
 
 # Client-level ``default_headers`` applied to OpenAI-compatible clients, keyed by
 # base-URL prefix. Currently only OpenRouter, which uses them for app attribution
@@ -76,7 +86,7 @@ def _build_gemini_http_options(base_url: str | None) -> genai_types.HttpOptions:
 
     return genai_types.HttpOptions(
         base_url=base_url,
-        timeout=_GEMINI_TIMEOUT_MS,
+        timeout=_timeout_ms(),
     )
 
 
@@ -88,7 +98,7 @@ def get_anthropic_client() -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key=settings.LLM.ANTHROPIC_API_KEY,
         base_url=settings.LLM.ANTHROPIC_BASE_URL,
-        timeout=_ANTHROPIC_TIMEOUT_S,
+        timeout=_timeout_s(),
     )
 
 
@@ -101,6 +111,8 @@ def get_openai_client() -> AsyncOpenAI:
         api_key=settings.LLM.OPENAI_API_KEY,
         base_url=settings.LLM.OPENAI_BASE_URL,
         default_headers=_default_headers_for(settings.LLM.OPENAI_BASE_URL),
+        timeout=_timeout_s(),
+        max_retries=settings.LLM.PROVIDER_MAX_RETRIES,
     )
 
 
@@ -128,6 +140,8 @@ def get_openai_override_client(
         api_key=api_key,
         base_url=base_url,
         default_headers=_default_headers_for(base_url),
+        timeout=_timeout_s(),
+        max_retries=settings.LLM.PROVIDER_MAX_RETRIES,
     )
 
 
@@ -139,9 +153,7 @@ def get_anthropic_override_client(
     """Anthropic client for a specific (base_url, api_key) pair. Cached by key."""
     from anthropic import AsyncAnthropic
 
-    return AsyncAnthropic(
-        api_key=api_key, base_url=base_url, timeout=_ANTHROPIC_TIMEOUT_S
-    )
+    return AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=_timeout_s())
 
 
 @lru_cache(maxsize=128)
