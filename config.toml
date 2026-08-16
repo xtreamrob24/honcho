@@ -56,9 +56,15 @@ api_key_env = "OPENAI_EMBEDDING_KEY"  # Name of the env var, not the key itself.
 # ---------------------------------------------------------------------------
 # Deriver — memory formation, one structured-output call per message batch
 # ---------------------------------------------------------------------------
+# On glm-4.7-flash rather than gpt-oss-20b: the deriver is a background grind
+# with no user waiting on it, so throughput matters more than depth here. It is
+# also the workload that wedged the endpoint — on failure the queue marks only
+# the first item errored (queue_manager.py:597) and re-claims the work unit, so
+# a call that keeps timing out keeps one request in flight ~continuously.
 [deriver.model_config]
 transport = "openai"
-model = "gpt-oss-20b"
+model = "glm-4.7-flash"
+thinking_effort = "low"  # Sent as `reasoning_effort` (backends/openai.py:367).
 # Uncomment if the deriver starts failing on malformed JSON rather than auth.
 # Many OpenAI-compatible servers (llama.cpp in particular) do not implement
 # strict `response_format: json_schema`; json_object injects the schema into
@@ -99,7 +105,8 @@ model = "gpt-oss-20b"
 # ---------------------------------------------------------------------------
 [summary.model_config]
 transport = "openai"
-model = "gpt-oss-20b"
+model = "glm-4.7-flash"
+thinking_effort = "low"
 
 # ---------------------------------------------------------------------------
 # Dream — memory consolidation. Two separate model calls, no [dream.model_config]
