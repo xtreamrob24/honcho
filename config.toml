@@ -1,0 +1,116 @@
+# Honcho deployment configuration
+#
+# Design: the self-hosted llama endpoint is the DEFAULT for every LLM call.
+# Embeddings are the single deliberate exception, because the llama server does
+# not serve embedding models — they are pinned to api.openai.com with their own
+# API key so no other feature can ever reach a paid OpenAI endpoint by accident.
+#
+# What lives where:
+#   - This file (in git): model routing. Which endpoint, which model, which
+#     env var holds which key. No secrets.
+#   - Coolify environment variables: the two API keys themselves, plus the
+#     usual deployment settings (DB_CONNECTION_URI, AUTH_JWT_SECRET, CACHE_URL).
+#
+# Precedence is `env > .env > config.toml > defaults` (src/config.py:683), so an
+# environment variable of the same name silently overrides anything set here.
+# That makes hotfixes easy, but it also means a leftover env var will mask this
+# file — see README notes in the deploy checklist before debugging.
+#
+# config.toml.example is the full reference of every available option; this file
+# intentionally sets only what differs from the built-in defaults.
+
+# ---------------------------------------------------------------------------
+# Provider defaults
+# ---------------------------------------------------------------------------
+# Every feature below uses transport = "openai" with no per-feature `overrides`
+# block, so they all resolve to the default OpenAI client, which is built from
+# these two values (src/llm/registry.py:96 and client_for_model_config at :195).
+# One base URL, nine model configs.
+#
+# LLM_OPENAI_API_KEY is NOT set here — it is the llama endpoint's key and lives
+# in Coolify's environment variables.
+[llm]
+OPENAI_BASE_URL = "https://llama.as.openheidelberg.de/v1"
+
+# ---------------------------------------------------------------------------
+# Embeddings — the one deliberate exception
+# ---------------------------------------------------------------------------
+# resolve_embedding_model_config (src/config.py:539) reads ONLY
+# embedding.model_config.overrides — it never inherits llm.OPENAI_BASE_URL. So
+# the base URL here is a real pin to OpenAI, not a redundant default.
+#
+# Without api_key_env, the embedding client falls back to LLM.OPENAI_API_KEY —
+# the llama key — and sends it to api.openai.com. That is the 401 this config
+# exists to prevent, so this line is load-bearing.
+[embedding]
+VECTOR_DIMENSIONS = 1536  # Must match the pgvector column width in migrations.
+
+[embedding.model_config]
+transport = "openai"
+model = "text-embedding-3-small"  # 1536 dims, matches VECTOR_DIMENSIONS above.
+
+[embedding.model_config.overrides]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_EMBEDDING_KEY"  # Name of the env var, not the key itself.
+
+# ---------------------------------------------------------------------------
+# Deriver — memory formation, one structured-output call per message batch
+# ---------------------------------------------------------------------------
+[deriver.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+# Uncomment if the deriver starts failing on malformed JSON rather than auth.
+# Many OpenAI-compatible servers (llama.cpp in particular) do not implement
+# strict `response_format: json_schema`; json_object injects the schema into
+# the prompt instead. Only honored on the openai transport.
+# structured_output_mode = "json_object"
+
+# ---------------------------------------------------------------------------
+# Dialectic — the recall agent, five reasoning tiers
+# ---------------------------------------------------------------------------
+# Each tier is a separate model config so you can put a larger model on the
+# higher tiers later without touching the rest. The non-model knobs
+# (MAX_TOOL_ITERATIONS, TOOL_CHOICE) keep their built-in defaults.
+#
+# Tool calling matters most here: this is the only agent that loops over tools
+# on the synchronous request path. Models below ~14B tend to miss tool calls.
+[dialectic.levels.minimal.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+[dialectic.levels.low.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+[dialectic.levels.medium.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+[dialectic.levels.high.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+[dialectic.levels.max.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+# ---------------------------------------------------------------------------
+# Summary — two-tier session summarization
+# ---------------------------------------------------------------------------
+[summary.model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+# ---------------------------------------------------------------------------
+# Dream — memory consolidation. Two separate model calls, no [dream.model_config]
+# ---------------------------------------------------------------------------
+# Dream only fires once DOCUMENT_THRESHOLD documents exist, after
+# IDLE_TIMEOUT_MINUTES of quiet, and at most every MIN_HOURS_BETWEEN_DREAMS.
+# A misconfiguration here stays silent for a long time, then fails overnight.
+[dream.deduction_model_config]
+transport = "openai"
+model = "gpt-oss-20b"
+
+[dream.induction_model_config]
+transport = "openai"
+model = "gpt-oss-20b"

@@ -184,6 +184,11 @@ timing_logs.csv
 
 config.json
 config.toml
+# This deployment tracks its own config.toml in git: it holds only non-secret
+# model routing (which endpoint + which model each feature uses) so the
+# Dockerfile's `COPY config.toml* /app/` bakes it into the image. Secrets stay
+# in environment variables and are referenced by name via `api_key_env`.
+!config.toml
 .aider*
 
 CRUSH.md
